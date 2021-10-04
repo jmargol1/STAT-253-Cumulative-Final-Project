@@ -1,0 +1,39 @@
+---
+title: "Homework/Final Pt 1"
+author: "Joe Margolis"
+date: "9/13/2021"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Project Work
+```{r}
+library(readr)
+library(ggplot2)
+library(dplyr)
+library(tidymodels)
+tidymodels_prefer()
+
+hitterData <- read_csv("Batting.csv")
+```
+  
+  This data set is one of many datasets coming from a project achieved by baseball analyst and journalist Sean Lahman where he gathered tons of data trying to represent the full history of baseball. This particular dataset focuses on the hitters of baseball with each of the 101,332 cases representing a different position player to play at the top level of professional baseball since 1871. The variables in this dataset cover hitting stats for players for every year they played and sometimes an extra set of data in the same year if they switched teams. They cover stats including how many of each type of hit they got, walks, strikeouts, steals, etc. Sean has been continuously collecting and updating this data, last updating it to cover through the 2014 season, as an ongoing project to make the data easily accessible as he poses potentional questions for other analysts, and even for some of his own projects, to be explored and shared with the baseball community.
+  From this dataset I have been led to three potential research questions. The first is regression based and poses the question "As time has gone on, how has the importance of batting average changed?". The next question is a classification question wondering if more home runs get hit on teams in colder or warmer areas?  Finally an unsupervised question could divide players into seasons with less than 10 homers, 10-30 homers, 30-50 homers, And then more than 50 homers and look into how each group steals bases compared to how often they walk or get a single to see if faster players can tend to be stronger and hit more homers?
+  
+# Portfolio
+https://docs.google.com/document/d/12qm3A6qFtpUczJQmXUdNDhEnJfgyGIt_4j-niHFE348/edit?usp=sharing
+
+  
+# Reflection
+##Ethics
+
+  This article dives into the idea of machine biases, particularly in the case of a coding software that Amazon attempted to create in order to expedite the recruiting process of new workers. The only issue is that coded machines only know as much as they are programmed to know and all that was given to these machines were the resumes of hired and not hired applicants. Of course in a corporate America, this meant that the data given to the computer to choose from told the computer that men were preferred due to the fact that the heavy majority of previous hired applicants were male. While Amazon noticed this and cancelled the program, other companies have continued with their own programs, boding the question of whether or not the machines can really help reduce the biases of recruiting process. This answer is honesty pretty doubtful, at least in the near future, since America for so long has been corporately run by white men no matter what data is given to the computer program it can be expected that there will be a bias towards white men in a program of this type. I believe the only was would be do have all applicants go through multiple recruiters of diverse backgrounds for a long time and use their hirees in a program to hopefully reduce any type of biases and create a fair hiring program.
+  
+##My Reflection
+
+  I have definitely been feeling a little swamped with my workload to start off this school year. I personally was a big fan of the module system because I am a guy that usually likes to just focus and grind out things one at a time as opposed to slowly go through multiple tasks slowly. For that reason it has been slightly tough for my time management adjusting back into the normal semester system. Along with that the fall baseball season has been in full swing taking up a ton of my time with practices nearly every day. To improve this in the next few weeks I am beginning to try, and definitely need to finalize, a much easier to follow routine of work every day to keep myself from falling behind. Since this and two of my other classes are problem set based classes where they are impossible to do in one sitting like I usually prefer I need to come up with a routine of spending a certain amount of time on each of the classes every day to make the whole process easier on me.
+  
+  
