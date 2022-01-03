@@ -1,0 +1,772 @@
+```{r hw2_setup, include=FALSE}
+knitr::opts_chunk$set(echo=TRUE, eval=TRUE)
+```
+
+# What are the most important NBA stats to help your team win?
+## By; Joe Margolis and Colin Morefield{-}
+
+<br><br><br>
+
+a & b.
+
+```{r}
+# library statements 
+library(dplyr)
+library(readr)
+library(broom)
+library(ggplot2)
+library(tidymodels) 
+library(probably)
+library(rpart.plot)
+library(ISLR)
+library(mgcv)
+tidymodels_prefer()
+# read in data
+NBAstats <- read_csv("Seasons_Stats.csv")
+
+```
+
+## Data Cleaning
+```{r}
+# data cleaning
+NBAstatsWith3 <- NBAstats %>%
+    filter(Year >= 1980)
+
+NBAstats3Min <- NBAstatsWith3 %>%
+    filter(MP >= 1300)
+
+NBAstats3MinTrade <- NBAstats3Min %>%
+    group_by(Year, Player) %>%
+    mutate(num_entry = n()) %>%
+    ungroup() %>%
+    filter(num_entry ==1 | (num_entry > 1 & Tm == 'TOT')) %>%
+    select(-blanl) %>% #a random blank column in the dataset
+    select(-blank2) %>% #a second random blank column in the dataset
+    select(-GS) %>% #
+    select(-OWS) %>% #This is just the same as our response variable but with just offense and not adjusted for time
+    select(-DWS) %>% #This is just the same as our response variable but with just defense and not adjusted for time
+    select(-WS) %>% #This is just the same as our response variable but just not adjusted for time
+    select(-BPM) %>%
+    select(-DBPM) %>%
+    select(-OBPM) %>%
+    select(-VORP) %>%
+    select(-PER) %>%
+    select(-`AST%`) %>%
+    select(-`BLK%`) %>%
+    select(-`ORB%`)%>%
+    select(-`DRB%`) %>%
+    select(-`TRB%`) %>%
+    select(-`STL%`) %>%
+    select(-MP) %>%
+    select(-G) %>%
+    select(-Age)
+  
+
+NBAstats3MinTrade[is.na(NBAstats3MinTrade)] = 0 #for some reason dataset made all spots that should be zero values into NA values
+```
+
+```{r}
+# creation of cv folds
+set.seed(123)
+NBAstats_cv10 <- vfold_cv(NBAstats3MinTrade, v = 10)
+```
+
+# Quantitative Testing
+
+## Linear Model
+```{r}
+# model spec
+lm_lasso_spec <- 
+  linear_reg() %>%
+  set_args(mixture = 1, penalty = 0) %>% ## mixture = 1 indicates Lasso
+  set_engine(engine = 'glmnet') %>% #note we are using a different engine
+  set_mode('regression')
+
+```
+
+```{r}
+# recipes & workflows
+    
+NBAstats_rec <- recipe( `WS/48` ~ . , data = NBAstats3MinTrade) %>%
+  # we don't want to use ID variables as predictors
+  update_role(Player, new_role = "Player") %>% 
+    update_role(Tm, new_role = "Tm") %>%
+    update_role(Pos, new_role = "Pos") %>%
+    update_role(`...1`, new_role = "...1") %>%
+    update_role(Year, new_role = "Year") %>%
+  update_role(num_entry, new_role = "num_entry") %>%
+  step_novel(all_nominal_predictors()) %>% 
+  step_dummy(all_nominal_predictors()) %>% 
+  step_nzv(all_predictors()) %>%
+    step_corr(all_predictors()) %>%
+  step_normalize(all_numeric_predictors())  # important step for LASSO
+
+lasso_wf_NBAstats <- workflow() %>% 
+  add_recipe(NBAstats_rec) %>%
+  add_model(lm_lasso_spec) 
+
+lasso_fit_NBAstats <- lasso_wf_NBAstats %>% 
+  fit(data = NBAstats3MinTrade) # Fit to entire data set (for now)
+
+tidy(lasso_fit_NBAstats) # penalty = 0; equivalent to lm
+
+plot(lasso_fit_NBAstats %>% extract_fit_parsnip() %>% pluck('fit'), # way to get the original glmnet output
+     xvar = "lambda") # glmnet fits the model with a variety of lambda penalty values
+
+    
+```
+
+```{r}
+# fit & tune models
+lm_lasso_spec_tune <- 
+  linear_reg() %>%
+  set_args(mixture = 1, penalty = tune()) %>% ## tune() indicates that we will try a variety of values
+  set_engine(engine = 'glmnet') %>%
+  set_mode('regression') 
+
+lasso_wf_NBAstats <- workflow() %>% 
+  add_recipe(NBAstats_rec) %>%
+  add_model(lm_lasso_spec_tune) 
+
+penalty_grid <- grid_regular(
+  penalty(range = c(-8, -1)), #log10 transformed 
+  levels = 30)
+
+tune_output <- tune_grid( # new function for tuning parameters
+  lasso_wf_NBAstats, # workflow
+  resamples = NBAstats_cv10, # cv folds
+  metrics = metric_set(rmse, mae),
+  grid = penalty_grid # penalty grid defined above
+)
+
+
+```
+
+c.
+
+```{r, fig.width = 10}
+#  calculate/collect CV metrics
+collect_metrics(tune_output)%>%
+    select(penalty, rmse = mean, mae = mean, rsq = mean)
+
+best_penalty <- select_best(tune_output, metric = 'rmse') # choose best penalty value
+
+best_se_penalty <- select_by_one_std_err(tune_output, metric = 'mae', metric1 = 'rmse', metric2 = 'rsq', desc(penalty)) # choose largest penalty value within 1 se of the lowest cv mae
+best_se_penalty
+
+NBAstats_final_wk <- finalize_workflow(lasso_wf_NBAstats, best_se_penalty) # incorporates penalty value to workflow
+
+NBAstats_final_fit <- fit(NBAstats_final_wk, data = NBAstats3MinTrade)
+
+LMVars <- tidy(NBAstats_final_fit) %>%
+  mutate(estimateFromZero = abs(estimate)) %>%
+  arrange(desc(estimateFromZero))
+LMVars
+
+ggplot(LMVars, aes(x = reorder(term, -estimateFromZero), y = estimate)) +
+  geom_col()+
+  labs(title = "LASSO Coefficients of Input statistics", subtitle = "Describes the variable importance when using a penalty of 0.0001268961", x="Statistic",y="Coefficient")+
+  theme(axis.text.x = element_text(angle = 45, vjust = 0.75))
+
+cv_outputLM <- fit_resamples(
+  NBAstats_final_fit, # workflow
+  resamples = NBAstats_cv10, # cv folds
+  metrics = metric_set(rmse, mae, rsq))
+  
+cv_outputLM %>% collect_metrics()
+
+```
+
+ 
+d.
+
+```{r}
+# visual residuals
+autoplot(tune_output) + theme_classic()
+
+plot(NBAstats_final_fit %>% extract_fit_parsnip() %>% pluck('fit'), # way to get the original glmnet output
+     xvar = "lambda") # glmnet fits the model with a variety of lambda penalty values
+
+NBAstats_final_fit_lm <- lm(`WS/48` ~ TOV + AST + `TS%` + FT + ORB + `USG%`, data = NBAstats3MinTrade)
+
+# TOV residual
+NBAstats_final_fit_lm %>% 
+  augment() %>% #Merge the remaining variables into data set
+  ggplot(aes(x = TOV, y = .resid)) + #note patterns in residual/error with other variables
+  geom_point() +
+  geom_smooth() +
+  geom_hline(yintercept = 0) +
+  theme_classic()  
+
+#FT residual
+NBAstats_final_fit_lm %>% 
+  augment() %>% #Merge the remaining variables into data set
+  ggplot(aes(x = FT, y = .resid)) + #note patterns in residual/error with other variables
+  geom_point() +
+  geom_smooth() +
+  geom_hline(yintercept = 0) +
+  theme_classic()  
+
+#TS% residual
+NBAstats_final_fit_lm %>% 
+  augment() %>% #Merge the remaining variables into data set
+  ggplot(aes(x = `TS%`, y = .resid)) + #note patterns in residual/error with other variables
+  geom_point() +
+  geom_smooth() +
+  geom_hline(yintercept = 0) +
+  theme_classic()  
+
+#AST residual
+NBAstats_final_fit_lm %>% 
+  augment() %>% #Merge the remaining variables into data set
+  ggplot(aes(x = `AST`, y = .resid)) + #note patterns in residual/error with other variables
+  geom_point() +
+  geom_smooth() +
+  geom_hline(yintercept = 0) +
+  theme_classic() 
+
+# TOV residual
+NBAstats_final_fit_lm %>% 
+  augment() %>% #Merge the remaining variables into data set
+  ggplot(aes(x = `TOV`, y = .resid)) + #note patterns in residual/error with other variables
+  geom_point() +
+  geom_smooth() +
+  geom_hline(yintercept = 0) +
+  theme_classic() 
+
+#USG% residual
+NBAstats_final_fit_lm %>% 
+  augment() %>% #Merge the remaining variables into data set
+  ggplot(aes(x = `USG%`, y = .resid)) + #note patterns in residual/error with other variables
+  geom_point() +
+  geom_smooth() +
+  geom_hline(yintercept = 0) +
+  theme_classic() 
+
+#oRB residual
+NBAstats_final_fit_lm %>% 
+  augment() %>% #Merge the remaining variables into data set
+  ggplot(aes(x = ORB, y = .resid)) + #note patterns in residual/error with other variables
+  geom_point() +
+  geom_smooth() +
+  geom_hline(yintercept = 0) +
+  theme_classic() 
+
+#Predicted vs. Outcome
+LMResid <- tibble(.pred = NBAstats_final_fit_lm %>% 
+    predict(newdata = NBAstats3MinTrade)) %>% # function maintains the row order of new_data
+    bind_cols(NBAstats3MinTrade) %>%
+    mutate(resid = `WS/48` - .pred) # creates a new variable, residual variable of actual body fat - what the lm function predicts
+
+ggplot(LMResid, aes(x = .pred, y = resid)) +
+    geom_point() +
+    geom_smooth() + # adds a smooth line of best fit to scatter plot
+    geom_hline(yintercept = 0, color = "red") +
+    theme_classic()+
+    labs(title = "Predicted WS/48 vs. Residuals", subtitle = "Residual Plot of Linear Model", x="Predicted",y="Residual")
+```
+
+e.
+TOV + AST + `TS%` + FT + ORB + `USG%` 
+<br>
+
+Our best model to predict Win Share per 48 minutes would include the following predictors: turnovers, assists, true shooting percentage, free throws, offensive rebounding, and usage percentage. When making this model we hoped to get a combination of both having a good predictive accuracy while also being able to be interpreted for future data. We did look to lean towards accuracy since overfitting is not a current issue when the dataset contains every player from history.
+
+<br>
+
+## Spline Model
+```{r}
+spline_spec <- 
+  linear_reg() %>% ## mixture = 1 indicates Lasso
+  set_engine(engine = 'lm') %>% #note we are using a different engine
+  set_mode('regression')
+
+# New Recipe (remove steps needed for LASSO, add splines)
+spline_rec <- recipe(`WS/48` ~ TOV + AST + `TS%` + FT + ORB + `USG%`, data = NBAstats3MinTrade) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_ns(`USG%`, deg_free = 3) %>%
+  step_ns(TOV, deg_free = 3) %>%
+  step_ns(FT, deg_free = 3) %>%
+  step_ns(`TS%`, deg_free = 3) %>%
+  step_ns(`AST`, deg_free = 3) %>%
+  step_ns(ORB, deg_free = 3) 
+
+spline_rec %>% prep(NBAstats3MinTrade) %>% juice()
+
+# Workflow (Recipe + Model)
+spline_wf <- workflow() %>% 
+  add_recipe(spline_rec) %>%
+  add_model(spline_spec)
+
+# CV to Evaluate
+cv_output <- fit_resamples(
+  spline_wf, # workflow
+  resamples = NBAstats_cv10, # cv folds
+  metrics = metric_set(rmse, mae, rsq)
+)
+
+cv_output %>% collect_metrics()
+
+# Fit with all data
+ns_mod <- fit(
+  spline_wf, #workflow
+  data = NBAstats3MinTrade
+)
+
+
+```
+```{r}
+spline_mod_output <- NBAstats3MinTrade %>%
+  bind_cols(predict(ns_mod, new_data = NBAstats3MinTrade)) %>%
+    mutate(resid = `WS/48` - .pred)
+
+
+# Residual plots
+
+ggplot(spline_mod_output, aes(y = resid, x = `USG%`)) +
+    geom_point() +
+    geom_smooth() +
+    geom_hline(yintercept = 0, color = "red") + 
+    theme_classic()
+
+ggplot(spline_mod_output, aes(y = resid, x = TOV)) +
+    geom_point() +
+    geom_smooth() +
+    geom_hline(yintercept = 0, color = "red") + 
+    theme_classic()
+
+ggplot(spline_mod_output, aes(y = resid, x = FT)) +
+    geom_point() +
+    geom_smooth() +
+    geom_hline(yintercept = 0, color = "red") + 
+    theme_classic()
+
+ggplot(spline_mod_output, aes(y = resid, x = `TS%`)) +
+    geom_point() +
+    geom_smooth() +
+    geom_hline(yintercept = 0, color = "red") + 
+    theme_classic()
+
+ggplot(spline_mod_output, aes(y = resid, x = `AST`)) +
+    geom_point() +
+    geom_smooth() +
+    geom_hline(yintercept = 0, color = "red") + 
+    theme_classic()
+
+ggplot(spline_mod_output, aes(y = resid, x = `ORB`)) +
+    geom_point() +
+    geom_smooth() +
+    geom_hline(yintercept = 0, color = "red") + 
+    theme_classic()
+```
+## GAM Model
+```{r}
+# GAM Model
+GamNBAstats3MinTrade <- NBAstats3MinTrade%>%
+  rename("WinShareTime" = `WS/48`) %>%
+  rename("TSPct" = `TS%`)
+
+gam_spec <- 
+    gen_additive_mod() %>%
+  set_engine(engine = 'mgcv') %>%
+  set_mode('regression')
+
+gm_mod_initial <- fit(gam_spec,
+                 WinShareTime ~ s(TOV) + s(AST) + s(`TSPct`) + s(FT),
+               data = GamNBAstats3MinTrade  ) 
+```
+
+```{r}
+# Summary
+gm_mod_initial %>% pluck('fit') %>% summary()
+
+#visualize
+gm_mod_initial %>% pluck('fit') %>% plot(all.terms = TRUE)
+
+```
+
+## Smooth Spline
+```{r}
+#SMOOTHING SPLINE FIT
+Smoothspline_spec <- 
+  linear_reg() %>% ## mixture = 1 indicates Lasso
+  set_engine(engine = 'lm') %>% #note we are using a different engine
+  set_mode('regression')
+
+# New Recipe (remove steps needed for LASSO, add splines)
+Smoothspline_rec <- recipe(`WS/48` ~ TOV + AST + `TS%` + FT + ORB + `USG%`, data = NBAstats3MinTrade) %>%
+  step_dummy(all_nominal_predictors()) %>%
+  step_ns(TOV, deg_free = 3.171) %>%
+  step_ns(FT, deg_free =  1.012) %>%
+  step_ns(`TS%`, deg_free = 5.726) %>%
+  step_ns(`AST`, deg_free =  4.043) 
+
+Smoothspline_rec %>% prep(NBAstats3MinTrade) %>% juice()
+
+# Workflow (Recipe + Model)
+Smoothspline_wf <- workflow() %>% 
+  add_recipe(Smoothspline_rec) %>%
+  add_model(Smoothspline_spec)
+
+# CV to Evaluate
+cv_output <- fit_resamples(
+  Smoothspline_wf, # workflow
+  resamples = NBAstats_cv10, # cv folds
+  metrics = metric_set(rmse, mae, rsq)
+)
+
+cv_output %>% collect_metrics()
+
+# Fit with all data
+ns_mod <- fit(
+  Smoothspline_wf, #workflow
+  data = NBAstats3MinTrade
+)
+
+```
+
+    After running tests and producing three models, a linear model, a spline model,and a GAM model, we have elected to continue with the linear model at this point. When doing this we wanted to include a mixture of predictive accuracy and interpretability, and the main thing that stuck out was the minimal difference in error metrics between between the linear and spline models where the spline showed a decrease in mae of only about 0.0013. This was then reciprocated to the GAM model which had only a 0.002 higher r-squared value than the spline model. Along with that it became evident through the residual plots of the linear model that very few of the variables show a non-linear pattern and even the ones that do are not all that exaggerated. For those reasons we decided that the improvement in accuracy of the spline and GAM models did not outweigh the loss of interpretability caused by using them and decided to keep the linear model.
+    
+# Categorical Testing
+
+## Data Cleaning
+```{r}
+#Making WS/48 categorical
+median(NBAstats3MinTrade$`WS/48`) # Finding the median NBA WS/48 to decide above vs. below average players
+
+NBAstats3MinTradeCat <- NBAstats3MinTrade %>%
+  mutate(`WS/48Cat` = cut(`WS/48`, breaks=c(-0.1, 0.103, 0.33), labels=c("Below Average","Above Average"))) %>%
+  mutate(`WS/48Cat` = relevel(`WS/48Cat`, ref='Below Average')) %>%
+  select(-`WS/48`) 
+
+data_cv10 <- vfold_cv(NBAstats3MinTradeCat, v = 10)
+```
+
+## Logistic Regression
+
+### Model Specification
+```{r}
+logistic_spec <- logistic_reg() %>%
+    set_engine('glm') %>%
+    set_mode('classification')
+```
+
+### Recipe and Workflow
+```{r}
+# Recipe 
+logistic_rec <- recipe(`WS/48Cat` ~ ., data = NBAstats3MinTradeCat, family = binomial('logit'), maxit = 100)%>%
+  update_role(Player, new_role = "Player") %>% 
+    update_role(Tm, new_role = "Tm") %>%
+    update_role(Pos, new_role = "Pos") %>%
+    update_role(`...1`, new_role = "...1") %>%
+    update_role(Year, new_role = "Year") %>%
+  step_normalize(all_numeric_predictors()) %>%
+  step_dummy(all_nominal_predictors())
+
+# Workflow
+log_wf <- workflow() %>% 
+    add_recipe(logistic_rec) %>%
+    add_model(logistic_spec) 
+```
+
+### Fit Model
+```{r}
+logistic_mod_fit <- workflow() %>%
+  add_model(logistic_spec) %>%
+  add_recipe(logistic_rec) %>%
+  fit(data = NBAstats3MinTradeCat) 
+```
+
+### Examining Logistic Model
+```{r}
+# Print out Coefficients
+logistic_mod_fit %>% tidy()
+
+# Get Exponentiated coefficients + CI
+LGVars <- logistic_mod_fit %>% tidy() %>%
+  mutate(OR.conf.low = exp(estimate - 1.96*std.error), OR.conf.high = exp(estimate + 1.96*std.error)) %>% # do this first
+  mutate(OR = exp(estimate)) %>%
+  mutate(estimateFromZero = abs(estimate)) %>%
+  arrange(desc(estimateFromZero))
+
+LGVars
+
+ggplot(LGVars, aes(x = reorder(term, -estimateFromZero), y = estimate)) +
+  geom_col()+
+  labs(title = "Logistic Coefficients of Input statistics", subtitle = "Describes the variable importance when using a logistic model", x="Statistic",y="Coefficient")+
+  theme(axis.text.x = element_text(angle = 45, vjust = 0.75))
+```
+<br>
+
+### Hard and Soft Predictions
+```{r}
+# Make soft (probability) predictions
+predict(logistic_mod_fit, new_data = NBAstats3MinTradeCat, type = "prob")
+
+logistic_output <-  NBAstats3MinTradeCat %>%
+  bind_cols(predict(logistic_mod_fit, new_data = NBAstats3MinTradeCat, type = 'prob'))
+
+# Make hard (class) predictions (using a default 0.5 probability threshold)
+
+predict(logistic_mod_fit, new_data = NBAstats3MinTradeCat, type = "class")
+```
+
+### Evaluating Predictions
+```{r}
+# Soft predictions
+logistic_output <-  NBAstats3MinTradeCat %>%
+  bind_cols(predict(logistic_mod_fit, new_data = NBAstats3MinTradeCat, type = 'prob')) 
+
+# Hard predictions (you pick threshold)
+logistic_output <- logistic_output %>%
+  mutate(.pred_class = make_two_class_pred(`.pred_Below Average`, levels(`WS/48Cat`), threshold = .60)) 
+
+# Confusion Matrix
+logistic_output %>%
+  conf_mat(truth = `WS/48Cat`, estimate = .pred_class)
+
+# Sensitivity, Specificity, Accuracy
+log_metrics <- metric_set(sens, yardstick::spec, accuracy)
+logistic_output %>% 
+  log_metrics(estimate = .pred_class, truth = `WS/48Cat`, event_level = "second")
+
+```
+## Decision Trees/Forest
+
+### Model Spec/ Recipe/ Workflow/ Tune
+```{r}
+ct_spec_tune <- decision_tree() %>%
+  set_engine(engine = 'rpart') %>%
+  set_args(cost_complexity = tune(),  
+           min_n = 20, 
+           tree_depth = NULL) %>% 
+  set_mode('classification') 
+
+data_rec <- recipe(`WS/48Cat` ~ ., data = NBAstats3MinTradeCat)%>%
+  update_role(Player,new_role = "Player")%>%
+  update_role(Tm,new_role = "Tm")%>%
+  update_role(Pos,new_role = "Pos")%>%
+  update_role(`...1`,new_role = "...1")%>%
+  update_role(Year,new_role = "Year")%>%
+step_normalize(all_numeric_predictors())%>%
+  step_dummy(all_nominal_predictors())
+  
+
+data_wf_tune <- workflow() %>%
+  add_model(ct_spec_tune) %>%
+  add_recipe(data_rec)
+
+param_grid <- grid_regular(cost_complexity(range = c(-5, 1)), levels = 10) 
+
+tune_res <- tune_grid(
+  data_wf_tune, 
+  resamples = data_cv10, 
+  grid = param_grid, 
+  metrics = metric_set(accuracy) #change this for regression trees
+)
+```
+
+### Tuning Visual
+```{r}
+autoplot(tune_res) + theme_classic()
+```
+
+### Final Tree Fit
+```{r}
+best_complexity <- select_by_one_std_err(tune_res, metric = 'accuracy', desc(cost_complexity))
+best_complexity %>% pull(cost_complexity)
+data_wf_final <- finalize_workflow(data_wf_tune, best_complexity)
+
+NBA_final_fit <- fit(data_wf_final, data = NBAstats3MinTradeCat)
+
+
+tune_res %>% 
+  collect_metrics() %>%
+  filter(cost_complexity == best_complexity %>% pull(cost_complexity))
+```
+
+### Final Tree Visual
+```{r}
+NBA_final_fit %>% extract_fit_engine() %>% rpart.plot()
+```
+### Hard and Soft Predictions
+```{r}
+# Soft (probability) prediction
+predict(NBA_final_fit, new_data=NBAstats3MinTradeCat, type = "prob")
+
+# Hard (class) prediction
+predict(NBA_final_fit, new_data=NBAstats3MinTradeCat, type = "class")
+
+
+DTVars <- NBA_final_fit %>%
+  extract_fit_engine() %>%
+  pluck('variable.importance') 
+DTVars
+
+DTData <- tibble(varimp = DTVars, term = names(DTVars)) %>%
+  arrange(desc(varimp))
+
+ggplot(DTData, aes(x = reorder(term,-varimp) , y = varimp)) +
+  geom_col()+
+  labs(title = "Variable Importance from Decision Tree", x="Statistic",y="Variable Importance")+
+  theme(axis.text.x = element_text(angle = 45, vjust = 0.75))
+```
+# Clustering
+
+## K-Means Clustering
+
+```{r}
+
+# Create Cluster Data Table
+NBAstats3MinTradeClust <- NBAstats3MinTrade %>%
+  select(-`...1`, -Player, -Year, -Tm, -Pos, -num_entry)
+
+#Scale The Data
+kclust_k3_scale <- kmeans(scale(NBAstats3MinTradeClust), centers = 4)
+NBAstats3MinTradeClustOut <- NBAstats3MinTradeClust %>%
+    mutate(kclust_3_scale = factor(kclust_k3_scale$cluster))
+
+# Visualize the new cluster assignments
+summary(NBAstats3MinTradeClust)
+
+NBAstats3MinTradeClustOut %>%
+    group_by(kclust_3_scale) %>%
+    summarize(across(c(`TS%`, `3PAr`, FTr, `USG%`, `WS/48`, FG, FGA, `FG%`, `3P`, `3PA`, `2P`, `2P%`, `eFG%`, FT, FTA, `FT%`, ORB, DRB, TRB, AST, STL, BLK, TOV, PF, PTS), mean))
+
+```
+```{r}
+#Decide best cluster amount
+NBAstat_cluster_ss <- function(k){
+    # Perform clustering
+    kclust <- kmeans(scale(NBAstats3MinTradeClust), centers = k)
+
+    # Return the total within-cluster sum of squares
+    return(kclust$tot.withinss)
+}
+
+tibble(
+    k = 1:15,
+    tot_wc_ss = purrr::map_dbl(1:15, NBAstat_cluster_ss)) %>% 
+    ggplot(aes(x = k, y = tot_wc_ss)) +
+    geom_point() + 
+    labs(x = "Number of clusters",y = 'Total within-cluster sum of squares') + 
+    theme_classic()
+```
+
+```{r}
+# Data-specific function to cluster and calculate total within-cluster SS
+NBAstat_cluster_silhouette <- function(k){
+    # Perform clustering
+    kclust <- kmeans(scale(NBAstats3MinTradeClust), centers = k)
+
+     ss <- cluster::silhouette(kclust$cluster, dist(scale(NBAstats3MinTradeClust)))
+  
+    # Return the silhouette measures
+    return(mean(ss[, 3]))
+}
+
+# Choose value that MAXIMIZES average silhouette
+tibble(
+    k = 2:15,
+    avg_sil = purrr::map_dbl(2:15, NBAstat_cluster_silhouette)
+) %>% 
+    ggplot(aes(x = k, y = avg_sil)) +
+    geom_point() + 
+    labs(x = "Number of clusters",y = 'Average Silhouette') + 
+    theme_classic()
+   
+```
+### Principal Component Analysis for the K-Means Clustering
+```{r}
+pca_out <- prcomp(NBAstats3MinTradeClust, center = TRUE, scale = TRUE)
+rotation<-pca_out %>% pluck("rotation")
+xout <- pca_out %>% pluck("x")
+```
+
+```{r}
+head(rotation)
+head(xout)
+```
+
+```{r}
+mat<-rotation%>%
+  as.data.frame()%>%
+    select(PC1) %>%
+  arrange(desc(abs(PC1)))
+    mat%>%
+      head()
+
+```
+```{r}
+var_explained <- (pca_out %>% pluck('sdev'))^2
+pve <- var_explained/sum(var_explained)
+
+var_data <- tibble(
+    PC = seq_len(length(var_explained)),
+    var_explained = var_explained,
+    pve = pve
+)
+
+#Scree Plot
+p1 <- var_data %>%
+    ggplot(aes(x = PC, y = pve)) +
+    geom_point() + 
+    geom_line() + 
+    labs(x = 'Principal Component', y = 'Proportion of varinace explained') +
+    theme_classic()
+
+p2 <- var_data %>%
+    ggplot(aes(x = PC, y = cumsum(pve))) +
+    geom_point() + 
+    geom_line() + 
+    labs(x = 'Principal Component', y = 'Cumulative proportion of variance explained') +
+    theme_classic()
+
+library(ggpubr)
+ggarrange(p1, p2)
+```
+### Combining clusters with the pca to create visualization
+```{r}
+pcaCluster <- cbind(xout, NBAstats3MinTradeClustOut)
+
+ggplot(pcaCluster, aes(y = `PC1`, x = `PC2`, color = `kclust_3_scale`)) +
+    geom_point(alpha = 0.2) 
+```
+
+## Hierarchical Clustering
+
+```{r}
+NBAstats3MinTradeHClust <- NBAstats3MinTradeClust %>%
+    slice_sample(n = 50)
+
+# Summary statistics for the variables
+summary(NBAstats3MinTradeHClust)
+
+# Compute a distance matrix on the scaled data
+dist_mat_scaled <- dist(scale(NBAstats3MinTradeHClust))
+
+# The (scaled) distance matrix is the input to hclust()
+# The method argument indicates the linkage type
+hc_complete <- hclust(dist_mat_scaled, method = "complete")
+hc_single <- hclust(dist_mat_scaled, method = "single")
+hc_average <- hclust(dist_mat_scaled, method = "average")
+hc_centroid <- hclust(dist_mat_scaled, method = "centroid")
+
+# Plot dendrograms
+plot(hc_complete)
+plot(hc_single)
+plot(hc_average)
+plot(hc_centroid)
+```
+
+```{r}
+plot(hc_complete, labels = NBAstats3MinTradeHClust$TOV)
+plot(hc_complete, labels = NBAstats3MinTradeHClust$AST)
+plot(hc_complete, labels = NBAstats3MinTradeHClust$`TS%`)
+
+plot(hc_average, labels = NBAstats3MinTradeHClust$TOV)
+plot(hc_average, labels = NBAstats3MinTradeHClust$AST)
+plot(hc_average, labels = NBAstats3MinTradeHClust$`TS%`)
+```
+
+  One harm of the work we are doing is that it is possible that our removal of variables in this dataset could point towards unimportance of certain types of players which could affect careers. Since Win Shares per 48 minutes is a stat basically saying that a player helped their team win that much during the time they played, if a player has excelled at a stat that we removed it could deem them as unimportant and unnecessary. Some cautions we should take is ensuring that it is knows that some stats are having both their version as a total and their versions as a percentage used, for example turnovers, while others may only have a percentage used as a predictor or a total like three pointers. Another is how we communicate some of the variables we are using, ensuring that people know what variables like True shooting percentage or usage percentage mean.
